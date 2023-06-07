@@ -1,98 +1,138 @@
+const User = require("../models/user");
 const jwt = require("jsonwebtoken");
-const {db} = require("../index");
-const users = db.createCollection({
-    name: 'users'
-});
-users.data = [];
-const {v4: uuidv4} = require('uuid');
+const logging = require('../utils/logging');
+const logError = logging.logError;
 
 module.exports = {
 
-    users: users,
-
     create: (req, res, next) => {
-        const user = {
-            id: uuidv4(),
-            surname: req.body.surname,
-            lastname: req.body.lastname,
-            street: req.body.street,
-            streetNumber: req.body.streetNumber,
-            city: req.body.city,
-            mail: req.body.mail,
-            postCode: req.body.postCode,
-            password: req.body.password
-        };
-        users.data.push(user);
+        const mail = req.body.mail;
+        User.findOne({mail})
+            .then(existingUser => {
+                if(existingUser){
+                    return res.status(409).json({ error: 'User already exists' });
+                }
+                // create user in mongodb database
+                const userMongo = new User({
+                    firstName: req.body.firstName,
+                    lastName: req.body.lastName,
+                    street: req.body.street,
+                    streetNumber: req.body.streetNumber,
+                    city: req.body.city,
+                    mail: req.body.mail,
+                    postCode: req.body.postCode,
+                    password: req.body.password
+                });
 
-        const token = jwt.sign({
-                userId: user.id,
-            },
-            'mysupersecretbackendtoken', {
-                expiresIn: '1d'
-            }
-        );
+                return userMongo.save()
+                    .then((result) =>{
+                        const token = jwt.sign({ userId: result._id }, 'mysupersecretbackendtoken');
+                        User.findById(result._id).select('_id firstName lastName street streetNumber city mail postcode createdAt updatedAt')
+                            .then((user) => {
+                                res.cookie("token", token, {maxAge: 86400});
+                                res.status(201);
+                                res.send(user);
+                                next();
+                        });
 
-        db.save(true);
+                    })
+                    .catch((err) =>{
+                        logError(err);
+                        res.status(500).json({error: err});
+                    })
+            });
 
-        res.status(201);
-        res.cookie("token", token, {maxAge: 86400})
-        res.send(user);
 
-        next();
     },
 
     list: (req, res) => {
-        res.json(users.data);
+
+        User.find().select('_id firstName lastName street streetNumber city mail postcode createdAt updatedAt')
+            .then((result) => {
+                res.send(result);
+            })
+            .catch((err) => {
+                logError(err);
+            });
     },
 
     findSingle: (req, res) => {
-        let findOne = users.data.filter(user => user.id === req.params.id);
-        if (!findOne || findOne.length === 0) {
-            res.status(404).send("Not Found");
-        } else {
-            res.json(findOne);
-        }
+        User.findById(req.params.id).select('_id firstName lastName street streetNumber city mail postcode createdAt updatedAt')
+            .then((result) => {
+                res.send(result);
+            })
+            .catch((err) => {
+                logError(err);
+                res.status(404).json({error: "User not found"})
+            })
+
     },
 
     delete: (req, res) => {
-        let findOne = users.data.filter(user => user.id === req.params.id);
-        if (!findOne || findOne.length === 0) {
-            res.status(404).send("Not Found");
-        } else {
-            users.data.delete(findOne);
-            db.save(true);
-            res.status(204).send();
-        }
+        User.findByIdAndDelete(req.params.id)
+            .then(() => {
+                res.json({
+                    msg: "User deleted!",
+                });
+            })
+            .catch((err) => {
+                logError(err);
+            })
+
     },
 
     update: (req, res, next) => {
-        let findOne = users.data.filter(user => user.id === req.params.id);
+        User.findByIdAndUpdate(req.params.id, {
+            $set: {
+                firstName: req.body.firstName,
+                lastName: req.body.lastName,
+                street: req.body.street,
+                streetNumber: req.body.streetNumber,
+                city: req.body.city,
+                mail: req.body.mail,
+                postCode: req.body.postCode,
+            },
+        },{new:true})
+            .then((result) => {
+                User.findById(result._id).select('_id firstName lastName street streetNumber city mail postcode createdAt updatedAt')
+                    .then((user) => {
+                        res.send(user);
+                        next();
+                    });
+            })
+            .catch((err) => {
+                res.status(400).json({error: err});
+                logError(err);
+            })
 
-        if (!findOne || findOne.length === 0) {
-            res.status(404).send("Not Found");
-        }
-
-        const user = {
-            id: req.params.id,
-            surname: req.body.surname,
-            lastname: req.body.lastname,
-            street: req.body.street,
-            streetNumber: req.body.streetNumber,
-            city: req.body.city,
-            mail: req.body.mail,
-            postCode: req.body.postCode,
-            password: req.body.password
-        };
-        users.data.delete(findOne);
-        users.data.push(user);
-
-        db.save(true);
-
-        res.status(204);
-        res.cookie("token", token, {maxAge: 86400})
-        res.send();
-
-        next();
     },
+    updatePassword(req, res, next){
+        const userId = req.params.id;
+        const currentPassword = req.body.currentPassword;
+        const newPassword = req.body.newPassword;
+
+        User.findById(userId)
+            .then(user => {
+                if (!user) {
+                    return res.status(404).json({ error: 'User not found' });
+                }
+
+                return user.verifyPassword(currentPassword).then(isPasswordValid => {
+                    if (!isPasswordValid) {
+                        return res.status(401).json({ error: 'Invalid current password' });
+                    }
+
+                    user.password = newPassword;
+                    return user.save();
+                });
+            })
+            .then(() => {
+                res.json({ message: 'Password updated successfully' });
+            })
+            .catch(err => {
+                logError(err)
+                res.status(500).json({ error: 'Internal server error' });
+            });
+    }
 }
 
